@@ -20,6 +20,7 @@ type Task struct {
 	Cmds     []string `yaml:"cmds"`
 	Silent   bool     `yaml:"silent"`
 	Parallel bool     `yaml:"parallel"` // Add the parallel field for each task
+	Required []string `yaml:"required"` 
 }
 
 type Config struct {
@@ -27,6 +28,8 @@ type Config struct {
 	Usage string            `yaml:"usage"` // Add the usage field
 	Tasks []Task            `yaml:"modules"`
 }
+
+var moduleSyncChan = make(chan struct{}, 1)
 
 func main() {
 	var (
@@ -140,44 +143,80 @@ func parseArgs(defaultVars map[string]string) map[string]string {
 	return variables
 }
 
-
-
 func runAllTasks(config Config, variables map[string]string, cyan, magenta, white, yellow, red, green func(a ...interface{}) string) {
-	var wg sync.WaitGroup
-	var errorOccurred bool
-	var errorMutex sync.Mutex
+    var wg sync.WaitGroup
+    var errorOccurred bool
+    var errorMutex sync.Mutex
 
-	for _, task := range config.Tasks {
-		if task.Parallel {
-			wg.Add(1)
-			go func(name string, cmds []string, silent bool, vars map[string]string) {
-				defer wg.Done()
-				err := runTask(name, cmds, silent, vars, cyan, magenta, white, yellow, red, green)
-				if err != nil {
-					errorMutex.Lock()
-					errorOccurred = true
-					fmt.Fprintf(os.Stderr,"[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(name), red("errored"))
-					errorMutex.Unlock()
-				}
-			}(task.Name, task.Cmds, task.Silent, variables)
-		} else {
-			err := runTask(task.Name, task.Cmds, task.Silent, variables, cyan, magenta, white, yellow, red, green)
-			if err != nil {
-				errorOccurred = true
-				fmt.Fprintf(os.Stderr,"[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(task.Name), red("errored"))
-			}
-		}
-	}
+    // Create a map to track task completion
+    taskCompleted := make(map[string]bool)
 
-	wg.Wait() // Wait for all parallel tasks to finish
+    for _, task := range config.Tasks {
+        if len(task.Required) > 0 {
+            // Check if all required tasks are completed before running this task
+            allRequiredCompleted := true
+            for _, req := range task.Required {
+                if !taskCompleted[req] {
+                    allRequiredCompleted = false
+                    break
+                }
+            }
 
-	if errorOccurred {
-		fmt.Fprintf(os.Stderr,"[%s] [%s] Errors occurred during execution. Exiting program ❌\n", yellow(currentTime()), red("INFO"))
-		os.Exit(1) // Exit with error code 1
-	}
+            if !allRequiredCompleted {
+                // Wait and retry if required tasks are not completed
+                for !allRequiredCompleted {
+                    time.Sleep(2 * time.Second)
+                    allRequiredCompleted = true
+                    for _, req := range task.Required {
+                        if !taskCompleted[req] {
+                            allRequiredCompleted = false
+                            break
+                        }
+                    }
+                }
+            }
+        }
 
-	fmt.Fprintf(os.Stderr,"[%s] [%s] All modules completed successfully ✅\n", yellow(currentTime()), yellow("INFO"))
+        if task.Parallel {
+            // Use the moduleSyncChan to synchronize parallel executions
+            moduleSyncChan <- struct{}{}
+            wg.Add(1)
+            go func(name string, cmds []string, silent bool, vars map[string]string) {
+                defer func() {
+                    <-moduleSyncChan
+                    wg.Done()
+                }()
+                err := runTask(name, cmds, silent, vars, cyan, magenta, white, yellow, red, green)
+                if err != nil {
+                    errorMutex.Lock()
+                    errorOccurred = true
+                    fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(name), red("errored"))
+                    errorMutex.Unlock()
+                }
+                // Signal the completion of this task
+                taskCompleted[name] = true
+            }(task.Name, task.Cmds, task.Silent, variables)
+        } else {
+            err := runTask(task.Name, task.Cmds, task.Silent, variables, cyan, magenta, white, yellow, red, green)
+            if err != nil {
+                errorOccurred = true
+                fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(task.Name), red("errored"))
+            }
+            // Signal the completion of this task
+            taskCompleted[task.Name] = true
+        }
+    }
+
+    wg.Wait() // Wait for all parallel tasks to finish
+
+    if errorOccurred {
+        fmt.Fprintf(os.Stderr, "[%s] [%s] Errors occurred during execution. Exiting program ❌\n", yellow(currentTime()), red("INFO"))
+        os.Exit(1) // Exit with error code 1
+    }
+
+    fmt.Fprintf(os.Stderr, "[%s] [%s] All modules completed successfully ✅\n", yellow(currentTime()), yellow("INFO"))
 }
+
 
 func runTask(taskName string, cmds []string, silent bool, vars map[string]string, cyan, magenta, white, yellow, red, green func(a ...interface{}) string) error {
 	currentTime()
