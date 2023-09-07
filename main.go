@@ -163,17 +163,9 @@ func runAllTasks(config Config, variables map[string]string, cyan, magenta, whit
             }
 
             if !allRequiredCompleted {
-                // Wait and retry if required tasks are not completed
-                for !allRequiredCompleted {
-                    time.Sleep(2 * time.Second)
-                    allRequiredCompleted = true
-                    for _, req := range task.Required {
-                        if !taskCompleted[req] {
-                            allRequiredCompleted = false
-                            break
-                        }
-                    }
-                }
+                // Skip the task if required tasks are not completed
+                fmt.Fprintf(os.Stderr, "[%s] [%s] Skipping Module '%s' because required tasks are incomplete\n", yellow(currentTime()), red("INFO"), cyan(task.Name))
+                continue
             }
         }
 
