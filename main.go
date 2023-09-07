@@ -19,23 +19,21 @@ type Task struct {
 	Name     string   `yaml:"name"`
 	Cmds     []string `yaml:"cmds"`
 	Silent   bool     `yaml:"silent"`
-	Parallel bool     `yaml:"parallel"` // Add the parallel field for each task
-	Required []string `yaml:"required"` 
+	Parallel bool     `yaml:"parallel"`
+	Required []string `yaml:"required"`
 }
 
 type Config struct {
 	Vars  map[string]string `yaml:"vars"`
-	Usage string            `yaml:"usage"` // Add the usage field
+	Usage string            `yaml:"usage"`
 	Tasks []Task            `yaml:"modules"`
 }
-
-var moduleSyncChan = make(chan struct{}, 1)
 
 func main() {
 	var (
 		taskFile  string
 		variables map[string]string
-		quietMode bool // Flag to indicate quiet mode
+		quietMode bool
 	)
 
 	flag.StringVar(&taskFile, "w", "", "Path to the workflow YAML file")
@@ -43,7 +41,6 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 
-	// Color formatting functions
 	cyan := color.New(color.FgCyan).SprintFunc()
 	yellow := color.New(color.FgYellow).SprintFunc()
 	red := color.New(color.FgRed).SprintFunc()
@@ -51,10 +48,8 @@ func main() {
 	white := color.New(color.FgWhite).SprintFunc()
 	magenta := color.New(color.FgMagenta).SprintFunc()
 
-	// Print banner
 	if !quietMode {
-		// Print banner only if quiet mode is not enabled
-		fmt.Fprintf(os.Stderr,"\n%s\n\n", white(`
+		fmt.Fprintf(os.Stderr, "\n%s\n\n", white(`
 	                         __         
 	   _____________  ______/ /__  _____
 	  / ___/ __  / / / / __  / _ \/ ___/
@@ -65,7 +60,6 @@ func main() {
 	           		- v0.0.4 ⚡
 
 `))
-
 	}
 
 	var defaultVars map[string]string
@@ -81,7 +75,7 @@ func main() {
 	variables = parseArgs(defaultVars)
 
 	if taskFile == "" {
-		fmt.Fprintln(os.Stderr,"Usage: rayder -w workflow.yaml [variable assignments e.g. DOMAIN=example.host]")
+		fmt.Fprintln(os.Stderr, "Usage: rayder -w workflow.yaml [variable assignments e.g. DOMAIN=example.host]")
 		return
 	}
 
@@ -118,22 +112,20 @@ func parseArgs(defaultVars map[string]string) map[string]string {
 		}
 	}
 
-	// Check if "usage" was requested
 	if usageRequested {
-		fmt.Fprintln(os.Stderr,"Usage:")
-		fmt.Fprintln(os.Stderr,defaultVars["USAGE"])
+		fmt.Fprintln(os.Stderr, "Usage:")
+		fmt.Fprintln(os.Stderr, defaultVars["USAGE"])
 
-		fmt.Fprintln(os.Stderr,"\nVariables from YAML:")
+		fmt.Fprintln(os.Stderr, "\nVariables from YAML:")
 		for key, value := range defaultVars {
 			if key != "USAGE" {
-				fmt.Fprintf(os.Stderr,"%s: %s\n", key, value)
+				fmt.Fprintf(os.Stderr, "%s: %s\n", key, value)
 			}
 		}
 
 		os.Exit(0)
 	}
 
-	// Apply default values if not provided by the user
 	for key, defaultValue := range defaultVars {
 		if _, exists := variables[key]; !exists {
 			variables[key] = defaultValue
@@ -144,75 +136,82 @@ func parseArgs(defaultVars map[string]string) map[string]string {
 }
 
 func runAllTasks(config Config, variables map[string]string, cyan, magenta, white, yellow, red, green func(a ...interface{}) string) {
-    var wg sync.WaitGroup
-    var errorOccurred bool
-    var errorMutex sync.Mutex
+	var wg sync.WaitGroup
+	var errorOccurred bool
+	var errorMutex sync.Mutex
 
-    // Create a map to track task completion
-    taskCompleted := make(map[string]bool)
+	// Create a map to track task completion
+	taskCompleted := make(map[string]bool)
 
-    for _, task := range config.Tasks {
-        if len(task.Required) > 0 {
-            // Check if all required tasks are completed before running this task
-            allRequiredCompleted := true
-            for _, req := range task.Required {
-                if !taskCompleted[req] {
-                    allRequiredCompleted = false
-                    break
-                }
-            }
+	for _, task := range config.Tasks {
+		if len(task.Required) > 0 {
+			// Check if all required tasks are completed before running this task
+			allRequiredCompleted := true
+			for _, req := range task.Required {
+				if !taskCompleted[req] {
+					allRequiredCompleted = false
+					break
+				}
+			}
 
-            if !allRequiredCompleted {
-                // Skip the task if required tasks are not completed
-                fmt.Fprintf(os.Stderr, "[%s] [%s] Skipping Module '%s' because required tasks are incomplete\n", yellow(currentTime()), red("INFO"), cyan(task.Name))
-                continue
-            }
-        }
+			if !allRequiredCompleted {
+				// Wait until all required tasks are completed
+				for {
+					allRequiredCompleted = true
+					for _, req := range task.Required {
+						if !taskCompleted[req] {
+							allRequiredCompleted = false
+							break
+						}
+					}
 
-        if task.Parallel {
-            // Use the moduleSyncChan to synchronize parallel executions
-            moduleSyncChan <- struct{}{}
-            wg.Add(1)
-            go func(name string, cmds []string, silent bool, vars map[string]string) {
-                defer func() {
-                    <-moduleSyncChan
-                    wg.Done()
-                }()
-                err := runTask(name, cmds, silent, vars, cyan, magenta, white, yellow, red, green)
-                if err != nil {
-                    errorMutex.Lock()
-                    errorOccurred = true
-                    fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(name), red("errored"))
-                    errorMutex.Unlock()
-                }
-                // Signal the completion of this task
-                taskCompleted[name] = true
-            }(task.Name, task.Cmds, task.Silent, variables)
-        } else {
-            err := runTask(task.Name, task.Cmds, task.Silent, variables, cyan, magenta, white, yellow, red, green)
-            if err != nil {
-                errorOccurred = true
-                fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(task.Name), red("errored"))
-            }
-            // Signal the completion of this task
-            taskCompleted[task.Name] = true
-        }
-    }
+					if allRequiredCompleted {
+						break
+					}
 
-    wg.Wait() // Wait for all parallel tasks to finish
+					time.Sleep(1 * time.Second)
+				}
+			}
+		}
 
-    if errorOccurred {
-        fmt.Fprintf(os.Stderr, "[%s] [%s] Errors occurred during execution. Exiting program ❌\n", yellow(currentTime()), red("INFO"))
-        os.Exit(1) // Exit with error code 1
-    }
+		if task.Parallel {
+			wg.Add(1)
+			go func(name string, cmds []string, silent bool, vars map[string]string) {
+				defer wg.Done()
+				err := runTask(name, cmds, silent, vars, cyan, magenta, white, yellow, red, green)
+				if err != nil {
+					errorMutex.Lock()
+					errorOccurred = true
+					fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(name), red("errored"))
+					errorMutex.Unlock()
+				}
+				// Signal the completion of this task
+				taskCompleted[name] = true
+			}(task.Name, task.Cmds, task.Silent, variables)
+		} else {
+			err := runTask(task.Name, task.Cmds, task.Silent, variables, cyan, magenta, white, yellow, red, green)
+			if err != nil {
+				errorOccurred = true
+				fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ❌\n", yellow(currentTime()), red("INFO"), cyan(task.Name), red("errored"))
+			}
+			// Signal the completion of this task
+			taskCompleted[task.Name] = true
+		}
+	}
 
-    fmt.Fprintf(os.Stderr, "[%s] [%s] All modules completed successfully ✅\n", yellow(currentTime()), yellow("INFO"))
+	wg.Wait() // Wait for all parallel tasks to finish
+
+	if errorOccurred {
+		fmt.Fprintf(os.Stderr, "[%s] [%s] Errors occurred during execution. Exiting program ❌\n", yellow(currentTime()), red("INFO"))
+		os.Exit(1) // Exit with error code 1
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] [%s] All modules completed successfully ✅\n", yellow(currentTime()), yellow("INFO"))
 }
-
 
 func runTask(taskName string, cmds []string, silent bool, vars map[string]string, cyan, magenta, white, yellow, red, green func(a ...interface{}) string) error {
 	currentTime()
-	fmt.Fprintf(os.Stderr,"[%s] [%s] Module '%s' %s ⚡\n", yellow(currentTime()), yellow("INFO"), cyan(taskName), yellow("running"))
+	fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ⚡\n", yellow(currentTime()), yellow("INFO"), cyan(taskName), yellow("running"))
 
 	var hasError bool
 	for _, cmd := range cmds {
@@ -227,7 +226,7 @@ func runTask(taskName string, cmds []string, silent bool, vars map[string]string
 		return fmt.Errorf("Module '%s' %s ❌", taskName, red("errored"))
 	}
 
-	fmt.Fprintf(os.Stderr,"[%s] [%s] Module '%s' %s ✅\n", yellow(currentTime()), yellow("INFO"), cyan(taskName), green("completed"))
+	fmt.Fprintf(os.Stderr, "[%s] [%s] Module '%s' %s ✅\n", yellow(currentTime()), yellow("INFO"), cyan(taskName), green("completed"))
 	return nil
 }
 
